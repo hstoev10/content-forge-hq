@@ -19,21 +19,26 @@ serve(async (req) => {
       throw new Error('GOOGLE_GEMINI_API_KEY not configured');
     }
 
-    // Format messages for Gemini API
-    const contents = messages.map((msg: any) => ({
-      role: msg.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: msg.content }]
-    }));
-
-    // Add system message as first user message
-    contents.unshift({
+    // Add system message
+    const systemMessage = {
       role: 'user',
-      parts: [{ text: 'Ти си полезен AI асистент на новинарски сайт. Отговаряй на въпроси за новини, събития и информация от сайта. Бъди любезен и професионален.' }]
-    });
+      parts: [{ 
+        text: 'Ти си полезен AI асистент на новинарски сайт. Отговаряй на въпроси за новини, събития и информация от сайта. Бъди любезен и професионален.' 
+      }]
+    };
+
+    // Format messages for Gemini API
+    const contents = [
+      systemMessage,
+      ...messages.map((msg: any) => ({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }]
+      }))
+    ];
 
     // Call Gemini API with streaming
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key=${apiKey}`,
       {
         method: 'POST',
         headers: {
@@ -55,7 +60,7 @@ serve(async (req) => {
       throw new Error(`Gemini API error: ${response.status}`);
     }
 
-    // Create a ReadableStream to transform Gemini's streaming response
+    // Transform Gemini's SSE stream to AI SDK format
     const stream = new ReadableStream({
       async start(controller) {
         const reader = response.body?.getReader();
@@ -72,20 +77,31 @@ serve(async (req) => {
             if (done) break;
 
             const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n').filter(line => line.trim());
+            const lines = chunk.split('\n');
 
             for (const line of lines) {
-              try {
-                const parsed = JSON.parse(line);
-                const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (line.startsWith('data: ')) {
+                const jsonStr = line.slice(6).trim();
+                if (!jsonStr) continue;
                 
-                if (text) {
-                  // Send in AI SDK format
-                  const data = `0:"${text.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"\n`;
-                  controller.enqueue(new TextEncoder().encode(data));
+                try {
+                  const parsed = JSON.parse(jsonStr);
+                  const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+                  
+                  if (text) {
+                    // Send in AI SDK format: 0:"text"
+                    const escaped = text
+                      .replace(/\\/g, '\\\\')
+                      .replace(/"/g, '\\"')
+                      .replace(/\n/g, '\\n')
+                      .replace(/\r/g, '\\r')
+                      .replace(/\t/g, '\\t');
+                    const data = `0:"${escaped}"\n`;
+                    controller.enqueue(new TextEncoder().encode(data));
+                  }
+                } catch (e) {
+                  console.error('Error parsing SSE data:', e, jsonStr);
                 }
-              } catch (e) {
-                console.error('Error parsing line:', e);
               }
             }
           }
