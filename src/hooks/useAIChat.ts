@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import { streamText } from 'ai';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 
 interface Message {
   id: string;
@@ -32,33 +33,18 @@ export function useAIChat() {
     setIsLoading(true);
 
     try {
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messages: [...messages, userMessage]
-          })
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error('Failed to get response');
+      const apiKey = import.meta.env.VITE_GOOGLE_GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error('Google Gemini API key not configured');
       }
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      
-      if (!reader) {
-        throw new Error('No response stream');
-      }
+      // Initialize Google Generative AI
+      const google = createGoogleGenerativeAI({
+        apiKey: apiKey,
+      });
 
       const assistantId = (Date.now() + 1).toString();
-      let fullContent = '';
-
+      
       // Add empty assistant message
       setMessages(prev => [...prev, {
         id: assistantId,
@@ -66,28 +52,25 @@ export function useAIChat() {
         content: ''
       }]);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      // Stream the response
+      const { textStream } = await streamText({
+        model: google('gemini-2.5-flash'),
+        system: 'Ти си полезен AI асистент на новинарски сайт. Отговаряй на въпроси за новини, събития и информация от сайта. Бъди любезен и професионален.',
+        messages: [...messages, userMessage],
+      });
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n').filter(line => line.trim());
+      let fullContent = '';
 
-        for (const line of lines) {
-          if (line.startsWith('0:"')) {
-            const text = line.slice(3, -1)
-              .replace(/\\n/g, '\n')
-              .replace(/\\"/g, '"');
-            fullContent += text;
-
-            // Update assistant message
-            setMessages(prev => prev.map(msg => 
-              msg.id === assistantId 
-                ? { ...msg, content: fullContent }
-                : msg
-            ));
-          }
-        }
+      // Process the text stream
+      for await (const textPart of textStream) {
+        fullContent += textPart;
+        
+        // Update assistant message
+        setMessages(prev => prev.map(msg => 
+          msg.id === assistantId 
+            ? { ...msg, content: fullContent }
+            : msg
+        ));
       }
 
     } catch (error) {
